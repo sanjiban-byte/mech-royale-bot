@@ -279,7 +279,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-S-sniper"
+    name = "sanjiban-E-sniper"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -526,7 +526,7 @@ class Bot:
         flee = False
         flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
-            want = hp_frac < 0.3   # hunter: only break off when nearly dead
+            want = False   # E: never flee, finish the fight
             if want and target is not None and target.get("hp", 1400) < 0.5 * me["hp"]:
                 want = False       # B3: finish a kill that is almost done
             if want:
@@ -570,7 +570,7 @@ class Bot:
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
-            hunt = hp_frac > 0.3
+            hunt = True
             want_r = 35 if "lightning" in held else (110 if "laser" in held else 60)   # B3: laser keeps range
             if hunt:
                 if tdist > want_r + 10:
@@ -586,6 +586,7 @@ class Bot:
                     move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.5
                 else:
                     move_yaw = ty + self.strafe * math.pi / 2
+                    boost = me["energy"] > 30   # E: boosted side-steps, wider dodge
             if tdist < 25 and "lightning" not in held:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             # v5 peek: while the gun reloads (we can't shoot back), duck behind the nearest wall
