@@ -261,9 +261,9 @@ def _preferred_second(late, enemy_kinds):
 
 
 # ---------------------------------------------------------------- upgrades
-UPGRADE_ORDER = ["plating", "armor", "nanites", "gun_damage", "gun_rate",
+UPGRADE_ORDER = ["plating", "gun_damage", "gun_rate", "armor", "nanites", "gyros",
                  "laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "lightning_chain",
-                 "mortar_reload", "gun_velocity", "gyros", "sensors", "servos", "capacitor", "reactor",
+                 "gun_velocity", "mortar_reload", "sensors", "servos", "capacitor", "reactor",
                  "jets", "gun_mag", "mortar_splash", "mortar_velocity", "laser_pierce"]
 
 
@@ -278,7 +278,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-B2-hunter"
+    name = "sanjiban-B3-hunter"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -516,7 +516,8 @@ class Bot:
         # ---- choose a target: nearest visible enemy mech
         target = None
         if enemies:
-            target = min(enemies, key=lambda m: dist2(me["pos"], m["pos"]))
+            # B3: focus the weakest reachable enemy (a kill = +1 place); distance still matters
+            target = min(enemies, key=lambda m: m.get("hp", 1400) / 1400.0 * 100 + dist2(me["pos"], m["pos"]))
         tdist = dist2(me["pos"], target["pos"]) if target else 1e9
 
         # ---- fight or flee
@@ -524,6 +525,8 @@ class Bot:
         flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
             want = hp_frac < 0.3   # hunter: only break off when nearly dead
+            if want and target is not None and target.get("hp", 1400) < 0.5 * me["hp"]:
+                want = False       # B3: finish a kill that is almost done
             if want:
                 th = [m["pos"] for m in enemies]
                 if t - self.unseen_hit_t < 1.5:
@@ -564,7 +567,7 @@ class Bot:
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
             hunt = hp_frac > 0.3
-            want_r = 35 if "lightning" in held else 60   # B2: closer, more gun hits
+            want_r = 35 if "lightning" in held else (110 if "laser" in held else 60)   # B3: laser keeps range
             if hunt:
                 if tdist > want_r + 10:
                     move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.35
@@ -597,7 +600,7 @@ class Bot:
                     self.hide_zone = zkey
             dest = None
             # v5: free cubes nearby (kill piles) at any time when no enemy is around
-            if not enemies and (me["cubes"] < self.cfg["cubes"]["stat_cap"]
+            if all(dist2(me["pos"], m["pos"]) > 80 for m in enemies) and (me["cubes"] < self.cfg["cubes"]["stat_cap"]
                                 or me["cubes"] + 1 in self.cfg["cubes"]["upgrade_thresholds"]):
                 cs = [c for c in obs["cubes"] if dist2(me["pos"], c["pos"]) < 40 and abs(c["pos"][2] - z) < 4]
                 if cs:
