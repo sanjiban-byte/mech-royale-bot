@@ -4,6 +4,7 @@ Built from the plan agreed with Sanjiban (see thread). Sections follow the "kits
   map helpers, track & aim, weapon choice, resources, upgrades, movement/decision.
 """
 import math
+import random
 import os
 import array
 import json
@@ -278,7 +279,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-B3-hunter"
+    name = "sanjiban-S-sniper"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -310,6 +311,7 @@ class Bot:
         self.duck = None
         self.duck_t = -99.0
         self.multi_t = -99.0
+        self.jink_dt = 0.5
 
     # --- hiding spots: open ground cells right next to a tall wall
     def wall_spots(self):
@@ -560,9 +562,11 @@ class Bot:
             boost = me["energy"] > 25
         elif target and not flee:
             # duel from our spot: never walk toward them; side-step near the wall so shots miss
-            if t - self.strafe_t > 0.8 + (obs["tick"] % 7) * 0.1:
+            # S: random zig-zag every 0.3-0.7 s so bullets aimed at where we were going miss
+            if t - self.strafe_t > self.jink_dt:
                 self.strafe = -self.strafe
                 self.strafe_t = t
+                self.jink_dt = 0.3 + 0.4 * random.random()
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
@@ -573,6 +577,15 @@ class Bot:
                     move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.35
             elif self.hide and dist2(me["pos"], self.hide) > 8:
                 move_yaw = self.steer(me, self.hide, t)
+            # S: sniper band. With a laser, hold them 120-230 m away: our beam is instant, their bullets fly 0.5-0.9 s
+            sniper = "laser" in held and "lightning" not in held and hp_frac > 0.3
+            if sniper and target.get("hp", 1400) > 0.35 * 1400:
+                if tdist < 115:
+                    move_yaw = ty + math.pi + self.strafe * 0.6      # back away while zig-zagging, still facing them
+                elif tdist > 230:
+                    move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.5
+                else:
+                    move_yaw = ty + self.strafe * math.pi / 2
             if tdist < 25 and "lightning" not in held:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             # v5 peek: while the gun reloads (we can't shoot back), duck behind the nearest wall
@@ -607,6 +620,12 @@ class Bot:
                     dest = min(cs, key=lambda c: dist2(me["pos"], c["pos"]))["pos"]
             if dest is None and self.gather:
                 dest = self.loot_target(obs, me, held, pref, zone)
+            # S: no laser yet -> walk to the nearest known laser within 150 m inside the next circle
+            if dest is None and "laser" not in held and not any(dist2(me["pos"], m["pos"]) < 120 for m in enemies):
+                ls = [p for (k, p) in self.loot.values() if k == "laser" and abs(p[2] - z) < 6
+                      and dist2(me["pos"], p) < 150 and math.dist(p[:2], goal) < zone_r]
+                if ls:
+                    dest = min(ls, key=lambda p: dist2(me["pos"], p))
             # v5: supply drop if it is close, landed, uncontested and inside the next circle
             if dest is None and not enemies and t - self.threat_t > 15 and t - self.unseen_hit_t > 15:
                 for dr in obs.get("drops", []):
