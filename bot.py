@@ -162,7 +162,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v2-survivor"
+    name = "sanjiban-v3"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -290,9 +290,10 @@ class Bot:
         for s in self.sounds:
             if all(abs(wrap(s[1] - b)) > math.radians(15) for b in bearings + extra):
                 extra.append(s[1])
-        crowd = len(near) + len(extra)
+        # v3: sounds alone no longer count (one shooter's noisy bearings looked like a crowd)
+        crowd = len(near)
         if t - self.unseen_hit_t < 1.5:
-            crowd = max(crowd, len(near) + 1)
+            crowd = len(near) + 1
 
         hp_frac = me["hp"] / max(1, me["max_hp"])
         late = obs["alive"] <= 6 or zone["next_radius"] <= 70
@@ -344,12 +345,16 @@ class Bot:
 
         # ---- fight or flee
         flee = False
+        flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
-            if hp_frac < 0.4 or crowd >= 2:
-                flee = True
-            elif target and not self.can_win(me, target):
-                flee = True
-        if flee:
+            want = hp_frac < 0.4 or crowd >= 2 or (target is not None and not self.can_win(me, target))
+            if want:
+                th = [m["pos"] for m in enemies]
+                if t - self.unseen_hit_t < 1.5:
+                    th.append([x + 60 * math.cos(self.unseen_bearing), y + 60 * math.sin(self.unseen_bearing), z])
+                flee_spot = self.cover_spot(me, th, zone)
+                # v3: only run if there is cover to run to; running across open ground = shot in the back (x1.5)
+                flee = flee_spot is not None
             self.threat_t = t
 
         # ---- movement
@@ -363,7 +368,7 @@ class Bot:
             threats.append([x + 60 * math.cos(self.unseen_bearing), y + 60 * math.sin(self.unseen_bearing), z])
 
         if flee and threats:
-            spot = self.cover_spot(me, threats, zone)
+            spot = flee_spot
             if spot:
                 move_yaw = yaw_to(me["pos"], spot)
             else:
@@ -439,7 +444,7 @@ class Bot:
             act["aim"] = gun_aim
             d = dist2(me["pos"], aim_target["pos"])
             err = abs(wrap(me["aim"][0] - gun_aim[0]))
-            tol = math.atan2(2.0, max(d, 1))
+            tol = math.atan2(3.5, max(d, 1)) + 0.01   # v3: mech radius 2.5 m + spread; old 2 m was too strict
             los = self.map.clear(muzzle, [aim_target["pos"][0], aim_target["pos"][1], aim_target["pos"][2] + 4.5])
             for i, w in enumerate(me["weapons"]):
                 if not w:
@@ -512,9 +517,10 @@ class Bot:
         mine = side_dps([w["kind"] for w in me["weapons"] if w], me["cubes"])
         theirs = side_dps(en.get("weapons", ["gun"]), en.get("cubes", 0))
         their_hp = en.get("hp", 1400)
-        ttk_us = their_hp / max(mine * 0.6, 1)        # assume we hit ~60% (leading)
-        ttk_them = me["hp"] / max(theirs * 0.5, 1)
-        return ttk_them > 1.2 * ttk_us
+        # v3: assume equal hit rates; fight unless clearly weaker (old 1.2x margin made us flee every even fight)
+        ttk_us = their_hp / max(mine * 0.55, 1)
+        ttk_them = me["hp"] / max(theirs * 0.55, 1)
+        return ttk_them >= 0.8 * ttk_us
 
     def loot_target(self, obs, me, held, pref, zone, near_only=False):
         best, bd = None, 1e9
