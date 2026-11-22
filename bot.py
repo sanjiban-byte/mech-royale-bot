@@ -102,6 +102,115 @@ class Map:
         return True
 
 
+# ---------------------------------------------------------------- navigation
+import heapq
+import time as _time
+
+NAV = 8.0  # meters per navigation cell
+
+
+class Nav:
+    """8 m walkable grid + A* (time-boxed so a tick never runs long)."""
+
+    def __init__(self, m):
+        self.ok = False
+        if not m.ok:
+            return
+        self.m = m
+        k = int(NAV / CELL)
+        self.nx, self.ny = m.nx // k, m.ny // k
+        self.minx, self.miny = m.minx, m.miny
+        self.block = bytearray(self.nx * self.ny)
+        self.g = array.array("f", [0.0]) * (self.nx * self.ny)
+        for j in range(self.ny):
+            for i in range(self.nx):
+                solid, gs = 0, 0.0
+                for dj in range(k):
+                    base = (j * k + dj) * m.nx + i * k
+                    for di in range(k):
+                        gg = m.ground[base + di]
+                        gs += gg
+                        if m.h[base + di] > gg + 2:
+                            solid += 1
+                self.g[j * self.nx + i] = gs / (k * k)
+                if solid * 4 >= k * k:
+                    self.block[j * self.nx + i] = 1
+        self.ok = True
+
+    def cell(self, x, y):
+        i = min(self.nx - 1, max(0, int((x - self.minx) / NAV)))
+        j = min(self.ny - 1, max(0, int((y - self.miny) / NAV)))
+        return i, j
+
+    def center(self, i, j):
+        return (self.minx + (i + 0.5) * NAV, self.miny + (j + 0.5) * NAV)
+
+    def free_near(self, i, j):
+        if not self.block[j * self.nx + i]:
+            return i, j
+        for r in (1, 2, 3):
+            for dj in range(-r, r + 1):
+                for di in range(-r, r + 1):
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < self.nx and 0 <= jj < self.ny and not self.block[jj * self.nx + ii]:
+                        return ii, jj
+        return i, j
+
+    def path(self, a, b, budget=0.010):
+        t0 = _time.perf_counter()
+        nx = self.nx
+        s = self.free_near(*self.cell(a[0], a[1]))
+        e = self.free_near(*self.cell(b[0], b[1]))
+        if s == e:
+            return [b]
+        si, ei = s[1] * nx + s[0], e[1] * nx + e[0]
+        ex, ey = e
+        openh = [(0.0, si)]
+        gcost = {si: 0.0}
+        came = {}
+        best, bh = si, 1e18
+        n = 0
+        nb = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0), (1, 1, 1.414), (1, -1, 1.414), (-1, 1, 1.414), (-1, -1, 1.414))
+        while openh:
+            _, c = heapq.heappop(openh)
+            if c == ei:
+                best = c
+                break
+            n += 1
+            if n % 200 == 0 and _time.perf_counter() - t0 > budget:
+                break
+            ci, cj = c % nx, c // nx
+            h = math.hypot(ci - ex, cj - ey)
+            if h < bh:
+                best, bh = c, h
+            gc = gcost[c]
+            for di, dj, w in nb:
+                ii, jj = ci + di, cj + dj
+                if not (0 <= ii < nx and 0 <= jj < self.ny):
+                    continue
+                q = jj * nx + ii
+                if self.block[q]:
+                    continue
+                if di and dj and (self.block[cj * nx + ii] or self.block[jj * nx + ci]):
+                    continue
+                if abs(self.g[q] - self.g[c]) > 8:
+                    continue
+                ng = gc + w
+                if ng < gcost.get(q, 1e18):
+                    gcost[q] = ng
+                    came[q] = c
+                    heapq.heappush(openh, (ng + math.hypot(ii - ex, jj - ey), q))
+        out = []
+        c = best
+        while c in came:
+            out.append(self.center(c % nx, c // nx))
+            c = came[c]
+        out.reverse()
+        if best == ei:
+            out.append((b[0], b[1]))
+        return out
+
+
 # ---------------------------------------------------------------- track & aim
 def lead_point(me_muzzle, target, speed):
     """Where to aim a projectile of `speed` so a target moving at constant velocity walks into it."""
@@ -162,7 +271,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v3"
+    name = "sanjiban-v4"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -185,6 +294,12 @@ class Bot:
         self.hide = None          # current hiding spot [x, y, z]
         self.hide_zone = None     # next_center/radius it was chosen for
         self.spots = self.wall_spots()
+        self.nav = Nav(self.map)
+        self.path = []
+        self.path_dest = None
+        self.path_t = -99.0
+        self.kills = 0
+        self.multi_t = -99.0
 
     # --- hiding spots: open ground cells right next to a tall wall
     def wall_spots(self):
@@ -223,6 +338,29 @@ class Bot:
             if score < bs:
                 best, bs = [sx, sy, sz], score
         return best
+
+    # --- walking somewhere: straight if the way is clear, else follow an A* path
+    def steer(self, me, dest, t):
+        x, y, z = me["pos"]
+        if dist2(me["pos"], dest) < 15 or not self.nav.ok or self.map.clear([x, y, z + 3], [dest[0], dest[1], z + 3]):
+            self.path = []
+            return yaw_to(me["pos"], dest)
+        if (not self.path or self.path_dest is None or dist2(self.path_dest, dest) > 10
+                or t - self.path_t > 4 or self.stuck_t > 0.6):
+            self.path = self.nav.path(me["pos"], dest)
+            self.path_dest = list(dest[:2])
+            self.path_t = t
+        while len(self.path) > 1 and math.hypot(self.path[0][0] - x, self.path[0][1] - y) < 6:
+            self.path.pop(0)
+        # shortcut: aim at the farthest of the next few waypoints we can walk to directly
+        for k in range(min(4, len(self.path)) - 1, -1, -1):
+            p = self.path[k]
+            if self.map.clear([x, y, z + 3], [p[0], p[1], z + 3]):
+                return math.atan2(p[1] - y, p[0] - x)
+        if self.path:
+            p = self.path[0]
+            return math.atan2(p[1] - y, p[0] - x)
+        return yaw_to(me["pos"], dest)
 
     # --- small helpers
     def visible_from(self, a_pos, b_pos):
@@ -271,9 +409,13 @@ class Bot:
             self.last_seen[m["id"]] = (t, m["pos"])
         for p in obs["pickups"]:
             self.loot[p["id"]] = (p["kind"], p["pos"])
+        if sum(1 for m in enemies if dist2(me["pos"], m["pos"]) < 200) >= 2:
+            self.multi_t = t
         for e in obs["events"]:
             if e["type"] in ("took",) or (e["type"] == "take_failed" and e["reason"] == "gone"):
                 self.loot.pop(e["id"], None)
+            if e["type"] == "kill":
+                self.kills += 1
             if e["type"] == "damaged" and e.get("by") is not None:
                 if not any(m["id"] == e["by"] for m in enemies) and e.get("bearing") is not None:
                     self.unseen_hit_t = t
@@ -318,10 +460,9 @@ class Bot:
             if t - self.last_seen.get(mid, (-99, None))[0] < 60:
                 recent.update(ks)
         cur2_kind = me["weapons"][1]["kind"] if me["weapons"][1] else None
-        if cur2_kind and any(BEATS.get(k) == cur2_kind for k in recent):
-            pref = [k for k in pref if k != cur2_kind and BEATS.get(k) not in () ] + [cur2_kind]
-            pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
-                   [k for k in pref if any(BEATS.get(e) == k for e in recent)]
+        # v4: always push weapons that a recently seen enemy weapon beats to the back
+        pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
+               [k for k in pref if any(BEATS.get(e) == k for e in recent)]
         gather = t < 90 or (me["cubes"] < 5 and t < 180)
         self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
@@ -386,8 +527,14 @@ class Bot:
                 self.strafe_t = t
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
-            if self.hide and dist2(me["pos"], self.hide) > 8:
-                move_yaw = yaw_to(me["pos"], self.hide)
+            # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
+            hunt = (t < 150 and zone_r > 140 and t - self.multi_t > 20 and hp_frac > 0.6)
+            want_r = 35 if "lightning" in held else 80
+            if hunt:
+                if tdist > want_r + 10:
+                    move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.35
+            elif self.hide and dist2(me["pos"], self.hide) > 8:
+                move_yaw = self.steer(me, self.hide, t)
             if tdist < 25 and "lightning" not in held:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             if not me["in_zone"]:
@@ -405,7 +552,7 @@ class Bot:
             if dest is None:
                 dest = self.hide if self.hide else goal
             if dist2(me["pos"], dest) > 2.0:
-                move_yaw = yaw_to(me["pos"], dest)
+                move_yaw = self.steer(me, dest, t)
             boost = (not me["in_zone"]) and me["energy"] > 20
             if not me["in_zone"]:
                 boost = me["energy"] > 20
@@ -462,7 +609,8 @@ class Bot:
                     if ch > 0:
                         fire[i] = not (full and aim_ok and los)   # keep holding until ready, then release
                     else:
-                        fire[i] = los and d < w["stats"]["range"] and w["cooldown"] <= 0 and not shorted and not flee
+                        close = any(dist2(me["pos"], m["pos"]) < 30 for m in enemies)   # v4: never start charging up close
+                        fire[i] = los and d < w["stats"]["range"] and w["cooldown"] <= 0 and not shorted and not flee and not close
             # mortar wants its own pitch only when the gun isn't shooting
             if "mortar" in held and not ("gun" in held and fire[held["gun"]]):
                 mi = held["mortar"]
