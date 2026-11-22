@@ -11,6 +11,7 @@ import json
 import mechfight as mf
 
 TAU = 2 * math.pi
+MODE = "ghost"   # experiment A: never engage first, always break line of sight, shoot back only when cornered
 CELL = 2.0  # meters per cell of our coarse height map
 
 
@@ -277,7 +278,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v6"
+    name = "sanjiban-A-ghost"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -305,6 +306,7 @@ class Bot:
         self.path_dest = None
         self.path_t = -99.0
         self.kills = 0
+        self.last_hit_t = -99.0
         self.duck = None
         self.duck_t = -99.0
         self.multi_t = -99.0
@@ -443,6 +445,8 @@ class Bot:
         for e in obs["events"]:
             if e["type"] in ("took",) or (e["type"] == "take_failed" and e["reason"] == "gone"):
                 self.loot.pop(e["id"], None)
+            if e["type"] == "damaged":
+                self.last_hit_t = t
             if e["type"] == "kill":
                 self.kills += 1
             if e["type"] == "damaged" and e.get("by") is not None:
@@ -494,7 +498,7 @@ class Bot:
                [k for k in pref if any(BEATS.get(e) == k for e in recent)]
         pref = [k for k in pref if k != "mortar"] + (["mortar"] if "mortar" in pref else [])  # mortar always last
         gather = t < 90 or (me["cubes"] < 5 and t < 180)
-        self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
+        self.gather = gather and not enemies and False  # ghost: no loud gathering and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
         for p in obs["pickups"]:
             if dist2(p["pos"], me["pos"]) < self.reach - 0.3 and abs(p["pos"][2] - z) < 4 and p["kind"] in pref:
@@ -518,7 +522,7 @@ class Bot:
         flee = False
         flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
-            want = hp_frac < 0.4 or crowd >= 2 or (target is not None and not self.can_win(me, target))
+            want = True   # ghost: whenever anyone sees us, get out of sight
             if want:
                 th = [m["pos"] for m in enemies]
                 if t - self.unseen_hit_t < 1.5:
@@ -558,7 +562,7 @@ class Bot:
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
-            hunt = (t < 150 and zone_r > 140 and t - self.multi_t > 20 and hp_frac > 0.6)
+            hunt = False
             want_r = 35 if "lightning" in held else 80
             if hunt:
                 if tdist > want_r + 10:
@@ -723,6 +727,9 @@ class Bot:
         if g and aim_target is None and g.get("ammo", 12) < g["stats"]["mag"] * 0.5 and g.get("reload", 0) == 0:
             act["reload"] = True
 
+        # ghost: only shoot when cornered (no cover found) or we were hit in the last 3 s
+        if not (not flee or t - self.last_hit_t < 3):
+            fire = [False, False]
         act["fire"] = fire
         return act
 
