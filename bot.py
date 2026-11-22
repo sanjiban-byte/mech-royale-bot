@@ -11,6 +11,7 @@ import json
 import mechfight as mf
 
 TAU = 2 * math.pi
+MODE = "hunter"   # experiment B: always hunt the nearest enemy, all match long
 CELL = 2.0  # meters per cell of our coarse height map
 
 
@@ -277,7 +278,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v6"
+    name = "sanjiban-B-hunter"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -518,7 +519,7 @@ class Bot:
         flee = False
         flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
-            want = hp_frac < 0.4 or crowd >= 2 or (target is not None and not self.can_win(me, target))
+            want = hp_frac < 0.3   # hunter: only break off when nearly dead
             if want:
                 th = [m["pos"] for m in enemies]
                 if t - self.unseen_hit_t < 1.5:
@@ -558,7 +559,7 @@ class Bot:
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
-            hunt = (t < 150 and zone_r > 140 and t - self.multi_t > 20 and hp_frac > 0.6)
+            hunt = hp_frac > 0.3
             want_r = 35 if "lightning" in held else 80
             if hunt:
                 if tdist > want_r + 10:
@@ -613,6 +614,12 @@ class Bot:
                     if dest is None:
                         dest = [x, y, z]   # already inside the ring: stay
                     break
+            # hunter: go to the last place we saw an enemy (last 30 s), inside the next circle
+            if dest is None and not self.gather and hp_frac > 0.5:
+                cand = [(ts, p) for (ts, p) in self.last_seen.values()
+                        if t - ts < 30 and math.dist(p[:2], goal) < zone_r]
+                if cand:
+                    dest = max(cand, key=lambda c: c[0])[1]
             if dest is None:
                 dest = self.hide if self.hide else goal
             # v5: final circle: stand at its exact centre
