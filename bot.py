@@ -262,8 +262,8 @@ def _preferred_second(late, enemy_kinds):
 
 
 # ---------------------------------------------------------------- upgrades
-UPGRADE_ORDER = ["plating", "laser_damage", "laser_charge", "gun_damage", "gun_rate", "armor", "nanites", "gyros",
-                 "lightning_efficiency", "lightning_range", "lightning_chain",
+UPGRADE_ORDER = ["plating", "gun_damage", "gun_rate", "armor", "nanites", "gyros",
+                 "laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "lightning_chain",
                  "gun_velocity", "mortar_reload", "sensors", "servos", "capacitor", "reactor",
                  "jets", "gun_mag", "mortar_splash", "mortar_velocity", "laser_pierce"]
 
@@ -500,7 +500,6 @@ class Bot:
         pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
                [k for k in pref if any(BEATS.get(e) == k for e in recent)]
         pref = [k for k in pref if k != "mortar"] + (["mortar"] if "mortar" in pref else [])  # mortar always last
-        pref = ["laser"] + [k for k in pref if k != "laser"]   # D: laser always first, never swapped away
         gather = t < 90 or (me["cubes"] < 5 and t < 180)
         self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
@@ -523,8 +522,8 @@ class Bot:
             # D: an enemy aiming away from us takes x1.5 and can't shoot back: treat it as 60 m closer
             def back_bonus(m):
                 a = m.get("aim")
-                if not a:
-                    return 0
+                if not a or hp_frac < 0.5:
+                    return 0   # only worth the detour while we are healthy
                 return 60 if abs(wrap(a[0] - yaw_to(m["pos"], me["pos"]))) > math.pi / 2 else 0
             target = min(enemies, key=lambda m: m.get("hp", 1400) / 1400.0 * 100 + dist2(me["pos"], m["pos"]) - back_bonus(m))
         tdist = dist2(me["pos"], target["pos"]) if target else 1e9
