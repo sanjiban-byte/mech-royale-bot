@@ -277,7 +277,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v5"
+    name = "sanjiban-v6"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -569,9 +569,13 @@ class Bot:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             # v5 peek: while the gun reloads (we can't shoot back), duck behind the nearest wall
             gw = me["weapons"][held["gun"]] if "gun" in held else None
-            if gw and gw.get("reload", 0) > 0.3 and not hunt:
+            second_ready = any(w and w["kind"] in ("laser", "lightning") and w["cooldown"] <= 0.3
+                               and (w["kind"] != "lightning" or tdist < 45) for w in me["weapons"])
+            if gw and gw.get("reload", 0) > 0.3 and not hunt and not second_ready:
                 if self.duck is None or t - self.duck_t > 1.0:
                     self.duck = self.cover_spot(me, [target["pos"]], zone)
+                    if self.duck and dist2(me["pos"], self.duck) > 12:
+                        self.duck = None   # too far to be worth walking in the open
                     self.duck_t = t
                 if self.duck:
                     move_yaw = yaw_to(me["pos"], self.duck)
@@ -596,12 +600,12 @@ class Bot:
             if dest is None and self.gather:
                 dest = self.loot_target(obs, me, held, pref, zone)
             # v5: supply drop if it is close, landed, uncontested and inside the next circle
-            if dest is None and not enemies and t - self.threat_t > 5:
+            if dest is None and not enemies and t - self.threat_t > 15 and t - self.unseen_hit_t > 15:
                 for dr in obs.get("drops", []):
                     if dr["lands_in"] > 0 or (dr["holder"] is not None and dr["holder"] != me["id"]):
                         continue
                     dp = dr["pos"]
-                    if dist2(me["pos"], dp) > 120 or math.dist(dp[:2], goal) > zone_r:
+                    if dist2(me["pos"], dp) > 80 or math.dist(dp[:2], goal) > zone_r:
                         continue
                     if any(t - ts < 10 and dist2(p, dp) < 60 for (ts, p) in self.last_seen.values()):
                         continue
@@ -612,7 +616,7 @@ class Bot:
             if dest is None:
                 dest = self.hide if self.hide else goal
             # v5: final circle: stand at its exact centre
-            if zone_r < 30:
+            if zone_r <= 1 and dest is not None and math.dist(dest[:2], zone["center"]) > zone["radius"] - 4:
                 dest = [goal[0], goal[1], z]
             if dist2(me["pos"], dest) > 2.0:
                 move_yaw = self.steer(me, dest, t)
@@ -654,6 +658,7 @@ class Bot:
             act["aim"] = gun_aim
             d = dist2(me["pos"], aim_target["pos"])
             err = abs(wrap(me["aim"][0] - gun_aim[0]))
+            perr = abs(me["aim"][1] - gun_aim[1])   # v6: pitch must be on target too
             tol = math.atan2(3.5, max(d, 1)) + 0.01   # v3: mech radius 2.5 m + spread; old 2 m was too strict
             los = self.map.clear(muzzle, [aim_target["pos"][0], aim_target["pos"][1], aim_target["pos"][2] + 4.5])
             for i, w in enumerate(me["weapons"]):
@@ -661,7 +666,8 @@ class Bot:
                     continue
                 k = w["kind"]
                 if k == "gun":
-                    fire[i] = los and err < tol + 0.01 and d < w["stats"]["range"] and w.get("ammo", 1) > 0
+                    fire[i] = (los and err < tol + 0.01 and perr < tol + 0.03
+                               and d < w["stats"]["range"] and w.get("ammo", 1) > 0)
                 elif k == "lightning":
                     cone = math.radians(w["stats"].get("cone_deg", 30) / 2)
                     blocker = any(o is not aim_target and dist2(me["pos"], o["pos"]) < d
@@ -681,7 +687,9 @@ class Bot:
                         close = any(dist2(me["pos"], m["pos"]) < 30 for m in enemies)   # v4: never start charging up close
                         fire[i] = los and d < w["stats"]["range"] and w["cooldown"] <= 0 and not shorted and not flee and not close
             # mortar wants its own pitch only when the gun isn't shooting
-            if "mortar" in held and not ("gun" in held and fire[held["gun"]]):
+            gun_busy = "gun" in held and (me["weapons"][held["gun"]].get("reload", 0) > 0.5
+                                          or me["weapons"][held["gun"]].get("ammo", 1) == 0)
+            if "mortar" in held and (gun_busy or "gun" not in held):
                 mi = held["mortar"]
                 w = me["weapons"][mi]
                 if w["cooldown"] <= 0.2:
