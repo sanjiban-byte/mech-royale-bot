@@ -145,7 +145,7 @@ def preferred_second(late, enemy_kinds):
 
 
 # ---------------------------------------------------------------- upgrades
-UPGRADE_ORDER = ["armor", "plating", "nanites", "gun_damage", "gun_rate",
+UPGRADE_ORDER = ["plating", "armor", "nanites", "gun_damage", "gun_rate",
                  "laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "lightning_chain",
                  "mortar_reload", "gun_velocity", "gyros", "sensors", "servos", "capacitor", "reactor",
                  "jets", "gun_mag", "mortar_splash", "mortar_velocity", "laser_pierce"]
@@ -162,7 +162,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v1"
+    name = "sanjiban-v2-survivor"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -182,6 +182,47 @@ class Bot:
         self.strafe_t = 0.0
         self.sounds = []          # (t, bearing, kind)
         self.retreat_target = None
+        self.hide = None          # current hiding spot [x, y, z]
+        self.hide_zone = None     # next_center/radius it was chosen for
+        self.spots = self.wall_spots()
+
+    # --- hiding spots: open ground cells right next to a tall wall
+    def wall_spots(self):
+        m = self.map
+        out = []
+        if not m.ok:
+            return out
+        step = 3  # every 6 m
+        for j in range(2, m.ny - 2, step):
+            for i in range(2, m.nx - 2, step):
+                k = j * m.nx + i
+                g = m.ground[k]
+                if m.h[k] > g + 1.0:
+                    continue  # inside a building
+                tall = 0
+                for di, dj in ((2, 0), (-2, 0), (0, 2), (0, -2)):
+                    kk = (j + dj) * m.nx + (i + di)
+                    if m.h[kk] > g + 9:
+                        tall += 1
+                if tall:
+                    out.append((m.minx + (i + 0.5) * CELL, m.miny + (j + 0.5) * CELL, g, tall))
+        mf.log("hiding spots:", len(out))
+        return out
+
+    def pick_hide(self, me, zone):
+        c, r = zone["next_center"], zone["next_radius"]
+        lim = max(8.0, 0.55 * r)
+        best, bs = None, 1e18
+        x, y = me["pos"][0], me["pos"][1]
+        for sx, sy, sz, tall in self.spots:
+            dc = math.hypot(sx - c[0], sy - c[1])
+            if dc > lim:
+                continue
+            d = math.hypot(sx - x, sy - y)
+            score = d + 0.5 * dc - 15 * tall
+            if score < bs:
+                best, bs = [sx, sy, sz], score
+        return best
 
     # --- small helpers
     def visible_from(self, a_pos, b_pos):
@@ -270,6 +311,18 @@ class Bot:
             for k in ks:
                 kinds_count[k] = kinds_count.get(k, 0) + 1
         pref = preferred_second(late, kinds_count)
+        # counter-pick: if a recently seen enemy carries the weapon that beats ours, we want something else
+        recent = set()
+        for mid, ks in self.seen_kinds.items():
+            if t - self.last_seen.get(mid, (-99, None))[0] < 60:
+                recent.update(ks)
+        cur2_kind = me["weapons"][1]["kind"] if me["weapons"][1] else None
+        if cur2_kind and any(BEATS.get(k) == cur2_kind for k in recent):
+            pref = [k for k in pref if k != cur2_kind and BEATS.get(k) not in () ] + [cur2_kind]
+            pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
+                   [k for k in pref if any(BEATS.get(e) == k for e in recent)]
+        gather = t < 90 or (me["cubes"] < 5 and t < 180)
+        self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
         for p in obs["pickups"]:
             if dist2(p["pos"], me["pos"]) < self.reach - 0.3 and abs(p["pos"][2] - z) < 4 and p["kind"] in pref:
@@ -322,36 +375,35 @@ class Bot:
                     move_yaw = yaw_to(me["pos"], goal)
             boost = me["energy"] > 25
         elif target and not flee:
-            # duel: hold a comfortable range and strafe so leading shots miss us
-            want = 30 if "lightning" in held else 90
+            # duel from our spot: never walk toward them; side-step near the wall so shots miss
             if t - self.strafe_t > 0.8 + (obs["tick"] % 7) * 0.1:
                 self.strafe = -self.strafe
                 self.strafe_t = t
             ty = yaw_to(me["pos"], target["pos"])
-            if tdist > want + 15:
-                move_yaw = ty + self.strafe * 0.6
-            elif tdist < want - 15:
-                move_yaw = ty + math.pi - self.strafe * 0.6
-            else:
-                move_yaw = ty + self.strafe * math.pi / 2
+            move_yaw = ty + self.strafe * math.pi / 2
+            if self.hide and dist2(me["pos"], self.hide) > 8:
+                move_yaw = yaw_to(me["pos"], self.hide)
+            if tdist < 25 and "lightning" not in held:
+                move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             if not me["in_zone"]:
                 move_yaw = yaw_to(me["pos"], goal)
         else:
-            # no fight: loot nearby, else head to the safe middle of the next circle
+            # survivor: early quick loot nearby, then sit still at a hiding spot near the next centre
+            zkey = (round(goal[0]), round(goal[1]), round(zone_r))
+            if self.hide is None or self.hide_zone != zkey or t - self.threat_t < 0.2:
+                if self.hide is None or self.hide_zone != zkey or math.dist(self.hide[:2], goal) > 0.55 * zone_r:
+                    self.hide = self.pick_hide(me, zone)
+                    self.hide_zone = zkey
             dest = None
-            if not late or in_safe:
+            if self.gather:
                 dest = self.loot_target(obs, me, held, pref, zone)
-            if dest is None and not in_safe:
-                dest = goal
-            if dest is not None:
+            if dest is None:
+                dest = self.hide if self.hide else goal
+            if dist2(me["pos"], dest) > 2.0:
                 move_yaw = yaw_to(me["pos"], dest)
-                if dist2(me["pos"], dest) < 1.0:
-                    move_yaw = None
             boost = (not me["in_zone"]) and me["energy"] > 20
-            if not me["in_zone"] or zone["dps"] >= 60 and math.dist([x, y], zone["center"]) > zone["radius"] * 0.85:
-                move_yaw = yaw_to(me["pos"], goal)
+            if not me["in_zone"]:
                 boost = me["energy"] > 20
-
         # ---- stuck handling: commanded to move but not moving
         speed_now = math.hypot(me["vel"][0], me["vel"][1])
         if move_yaw is not None and speed_now < 2.0 and me["grounded"]:
@@ -378,7 +430,7 @@ class Bot:
         muzzle = [x, y, z + me["stats"].get("muzzle_height", 7)]
         fire = [False, False]
         aim_target = target
-        if aim_target is None and npcs and not flee:
+        if self.gather and aim_target is None and npcs and not flee:
             n = min(npcs, key=lambda m: dist2(me["pos"], m["pos"]))
             if dist2(me["pos"], n["pos"]) < 60:
                 aim_target = n
@@ -428,7 +480,7 @@ class Bot:
             act["aim"] = [wrap(me["aim"][0] + 0.6), 0.0]  # slow look-around when idle
 
         # crates: shoot them when nothing else to do
-        if aim_target is None and not flee and obs["crates"] and "aim" in act:
+        if self.gather and aim_target is None and not flee and obs["crates"] and "aim" in act:
             c = min(obs["crates"], key=lambda c: dist2(me["pos"], c["pos"]))
             if dist2(me["pos"], c["pos"]) < 60:
                 ca = aim_angles(muzzle, [c["pos"][0], c["pos"][1], c["pos"][2] + 1.2])
@@ -464,14 +516,14 @@ class Bot:
         ttk_them = me["hp"] / max(theirs * 0.5, 1)
         return ttk_them > 1.2 * ttk_us
 
-    def loot_target(self, obs, me, held, pref, zone):
+    def loot_target(self, obs, me, held, pref, zone, near_only=False):
         best, bd = None, 1e9
         # cubes in sight (up to the stat cap, or to the next upgrade threshold)
         cap = self.cfg["cubes"]["stat_cap"]
         if me["cubes"] < cap or me["cubes"] + 1 in self.cfg["cubes"]["upgrade_thresholds"]:
             for c in obs["cubes"]:
                 d = dist2(me["pos"], c["pos"])
-                if d < 80 and d < bd:
+                if d < (60 if near_only else 100) and d < bd:
                     best, bd = c["pos"], d
         if best:
             return best
@@ -485,12 +537,12 @@ class Bot:
             if abs(p[2] - me["pos"][2]) > 6:
                 continue  # on a roof: skip for now
             d = dist2(me["pos"], p)
-            if d < 120 and d < bd and math.dist(p[:2], zone["next_center"]) < zone["next_radius"]:
+            if d < (60 if near_only else 120) and d < bd and math.dist(p[:2], zone["next_center"]) < zone["next_radius"]:
                 best, bd = p, d
         if best:
             return best
         # crates nearby: walk into gun range
-        for c in obs["crates"]:
+        for c in ([] if near_only else obs["crates"]):
             d = dist2(me["pos"], c["pos"])
             if 40 < d < 90 and d < bd and abs(c["pos"][2] - me["pos"][2]) < 6:
                 best, bd = c["pos"], d
