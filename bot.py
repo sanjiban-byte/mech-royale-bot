@@ -278,7 +278,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-B-hunter"
+    name = "sanjiban-B2-hunter"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -306,6 +306,7 @@ class Bot:
         self.path_dest = None
         self.path_t = -99.0
         self.kills = 0
+        self.heard = None
         self.duck = None
         self.duck_t = -99.0
         self.multi_t = -99.0
@@ -454,6 +455,9 @@ class Bot:
             if s["kind"] in ("gun", "laser", "lightning", "mortar", "laser_charge") and s["dist"] != "far":
                 self.sounds.append((t - s["age"], s["bearing"], s["kind"]))
         self.sounds = [s for s in self.sounds if t - s[0] < 1.0]
+        for s in obs["sounds"]:
+            if s["kind"] in ("gun", "laser", "lightning", "death"):
+                self.heard = (s["bearing"], t - s["age"])
 
         # ---- crowd count: visible mechs near + extra sound directions
         near = [m for m in enemies if dist2(me["pos"], m["pos"]) < 150]
@@ -560,7 +564,7 @@ class Bot:
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
             hunt = hp_frac > 0.3
-            want_r = 35 if "lightning" in held else 80
+            want_r = 35 if "lightning" in held else 60   # B2: closer, more gun hits
             if hunt:
                 if tdist > want_r + 10:
                     move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.35
@@ -620,6 +624,13 @@ class Bot:
                         if t - ts < 30 and math.dist(p[:2], goal) < zone_r]
                 if cand:
                     dest = max(cand, key=lambda c: c[0])[1]
+            # B2: no one seen recently -> walk toward the latest gunfire we heard (60 m out), if inside the circle
+            if dest is None and not self.gather and hp_frac > 0.5 and self.heard:
+                hb, ht = self.heard
+                if t - ht < 8:
+                    p = [x + 60 * math.cos(hb), y + 60 * math.sin(hb), z]
+                    if math.dist(p[:2], goal) < zone_r:
+                        dest = p
             if dest is None:
                 dest = self.hide if self.hide else goal
             # v5: final circle: stand at its exact centre
