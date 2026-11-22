@@ -262,8 +262,8 @@ def _preferred_second(late, enemy_kinds):
 
 
 # ---------------------------------------------------------------- upgrades
-UPGRADE_ORDER = ["nanites", "plating", "gun_damage", "gun_rate", "armor", "gyros",
-                 "laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "lightning_chain",
+UPGRADE_ORDER = ["plating", "laser_damage", "laser_charge", "gun_damage", "gun_rate", "armor", "nanites", "gyros",
+                 "lightning_efficiency", "lightning_range", "lightning_chain",
                  "gun_velocity", "mortar_reload", "sensors", "servos", "capacitor", "reactor",
                  "jets", "gun_mag", "mortar_splash", "mortar_velocity", "laser_pierce"]
 
@@ -279,7 +279,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-C-sniper-straggler"
+    name = "sanjiban-D-sniper"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -311,7 +311,6 @@ class Bot:
         self.duck = None
         self.duck_t = -99.0
         self.multi_t = -99.0
-        self.healing = False
         self.jink_dt = 0.5
 
     # --- hiding spots: open ground cells right next to a tall wall
@@ -450,8 +449,6 @@ class Bot:
                 self.loot.pop(e["id"], None)
             if e["type"] == "kill":
                 self.kills += 1
-                if me["hp"] < 0.85 * me["max_hp"]:
-                    self.healing = True   # C: after a kill, heal up before the next hunt
             if e["type"] == "damaged" and e.get("by") is not None:
                 if not any(m["id"] == e["by"] for m in enemies) and e.get("bearing") is not None:
                     self.unseen_hit_t = t
@@ -477,19 +474,6 @@ class Bot:
             crowd = len(near) + 1
 
         hp_frac = me["hp"] / max(1, me["max_hp"])
-        # C: heal mode: below 65% HP stop hunting until back at 90%
-        if hp_frac < 0.65:
-            self.healing = True
-        if hp_frac >= 0.9:
-            self.healing = False
-        # C: where other enemies are (visible now, or seen in the last 5 s)
-        known = {m["id"]: m["pos"] for m in enemies}
-        for mid, (ts, p) in self.last_seen.items():
-            if mid not in known and t - ts < 5:
-                known[mid] = p
-
-        def isolated(m):
-            return all(dist2(m["pos"], p) > 70 for mid, p in known.items() if mid != m["id"])
         late = obs["alive"] <= 6 or zone["next_radius"] <= 70
 
         # ---- upgrades
@@ -516,6 +500,7 @@ class Bot:
         pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
                [k for k in pref if any(BEATS.get(e) == k for e in recent)]
         pref = [k for k in pref if k != "mortar"] + (["mortar"] if "mortar" in pref else [])  # mortar always last
+        pref = ["laser"] + [k for k in pref if k != "laser"]   # D: laser always first, never swapped away
         gather = t < 90 or (me["cubes"] < 5 and t < 180)
         self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
@@ -535,16 +520,20 @@ class Bot:
         target = None
         if enemies:
             # B3: focus the weakest reachable enemy (a kill = +1 place); distance still matters
-            # C: lone enemies first (no other enemy within 70 m of them), then weakest + nearest
-            target = min(enemies, key=lambda m: (0 if isolated(m) else 1,
-                                                 m.get("hp", 1400) / 1400.0 * 100 + dist2(me["pos"], m["pos"])))
+            # D: an enemy aiming away from us takes x1.5 and can't shoot back: treat it as 60 m closer
+            def back_bonus(m):
+                a = m.get("aim")
+                if not a:
+                    return 0
+                return 60 if abs(wrap(a[0] - yaw_to(m["pos"], me["pos"]))) > math.pi / 2 else 0
+            target = min(enemies, key=lambda m: m.get("hp", 1400) / 1400.0 * 100 + dist2(me["pos"], m["pos"]) - back_bonus(m))
         tdist = dist2(me["pos"], target["pos"]) if target else 1e9
 
         # ---- fight or flee
         flee = False
         flee_spot = None
         if target or t - self.unseen_hit_t < 1.5:
-            want = hp_frac < 0.3 or (crowd >= 2 and hp_frac < 0.6)   # C: also leave a 2-on-1 once hurt
+            want = hp_frac < 0.3   # hunter: only break off when nearly dead
             if want and target is not None and target.get("hp", 1400) < 0.5 * me["hp"]:
                 want = False       # B3: finish a kill that is almost done
             if want:
@@ -588,17 +577,11 @@ class Bot:
             ty = yaw_to(me["pos"], target["pos"])
             move_yaw = ty + self.strafe * math.pi / 2
             # hunt mode (early, only lone hunters seen, healthy): go to them; else hold our hiding spot
-            # C: walk in only on a lone enemy, a fair-or-better match-up, and not while healing
-            ours = [k for k in held if k != "gun"]
-            theirs = target.get("weapons", []) or self.seen_kinds.get(target["id"], [])
-            bad_matchup = any(BEATS.get(tk) == ok for tk in theirs for ok in ours)
-            good_matchup = any(BEATS.get(ok) == tk for tk in theirs for ok in ours)
-            hunt = (hp_frac > 0.3 and isolated(target) and not bad_matchup and (good_matchup or self.can_win(me, target))
-                    and (not self.healing or target.get("hp", 1400) < 0.5 * me["hp"]))
+            hunt = hp_frac > 0.3
             want_r = 35 if "lightning" in held else (110 if "laser" in held else 60)   # B3: laser keeps range
             if hunt:
                 if tdist > want_r + 10:
-                    move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.35
+                    move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.7   # D: wide weave while closing in
             elif self.hide and dist2(me["pos"], self.hide) > 8:
                 move_yaw = self.steer(me, self.hide, t)
             # S: sniper band. With a laser, hold them 120-230 m away: our beam is instant, their bullets fly 0.5-0.9 s
@@ -665,13 +648,13 @@ class Bot:
                         dest = [x, y, z]   # already inside the ring: stay
                     break
             # hunter: go to the last place we saw an enemy (last 30 s), inside the next circle
-            if dest is None and not self.gather and hp_frac > 0.5 and not self.healing:
+            if dest is None and not self.gather and hp_frac > 0.5:
                 cand = [(ts, p) for (ts, p) in self.last_seen.values()
                         if t - ts < 30 and math.dist(p[:2], goal) < zone_r]
                 if cand:
                     dest = max(cand, key=lambda c: c[0])[1]
             # B2: no one seen recently -> walk toward the latest gunfire we heard (60 m out), if inside the circle
-            if dest is None and not self.gather and hp_frac > 0.5 and self.heard and not self.healing:
+            if dest is None and not self.gather and hp_frac > 0.5 and self.heard:
                 hb, ht = self.heard
                 if t - ht < 8:
                     p = [x + 60 * math.cos(hb), y + 60 * math.sin(hb), z]
