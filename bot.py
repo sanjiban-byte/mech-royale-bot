@@ -586,7 +586,8 @@ class Bot:
                     move_yaw = self.steer(me, target["pos"], t) + self.strafe * 0.5
                 else:
                     move_yaw = ty + self.strafe * math.pi / 2
-                    boost = me["energy"] > 30   # E: boosted side-steps, wider dodge
+                    # E: boosted side-steps dodge bullets; useless against an instant laser, so skip then
+                    boost = me["energy"] > 30 and "laser" not in (target.get("weapons") or [])
             if tdist < 25 and "lightning" not in held:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
             # v5 peek: while the gun reloads (we can't shoot back), duck behind the nearest wall
