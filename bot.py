@@ -242,6 +242,12 @@ BEATS = {"laser": "mortar", "mortar": "lightning", "lightning": "laser"}
 
 
 def preferred_second(late, enemy_kinds):
+    # v5: mortar stays, but always last: better than an empty slot, replaced by laser/lightning
+    lst = _preferred_second(late, enemy_kinds)
+    return [k for k in lst if k != "mortar"] + ["mortar"]
+
+
+def _preferred_second(late, enemy_kinds):
     if not late:
         return ["laser", "lightning", "mortar"]
     counts = {k: enemy_kinds.get(k, 0) for k in BEATS.values()}
@@ -271,7 +277,7 @@ def pick_upgrade(choices, danger):
 
 # ---------------------------------------------------------------- the bot
 class Bot:
-    name = "sanjiban-v4"
+    name = "sanjiban-v5"
 
     def __init__(self, hello):
         cfg = hello["config"]
@@ -299,6 +305,8 @@ class Bot:
         self.path_dest = None
         self.path_t = -99.0
         self.kills = 0
+        self.duck = None
+        self.duck_t = -99.0
         self.multi_t = -99.0
 
     # --- hiding spots: open ground cells right next to a tall wall
@@ -361,6 +369,27 @@ class Bot:
             p = self.path[0]
             return math.atan2(p[1] - y, p[0] - x)
         return yaw_to(me["pos"], dest)
+
+    def open_dir(self, me):
+        """Direction away from nearby walls (where enemies can come from)."""
+        x, y, z = me["pos"]
+        key = (round(x / 4), round(y / 4))
+        if getattr(self, "_open_key", None) == key:
+            return self._open_val
+        wx = wy = 0.0
+        for k in range(12):
+            a = k * TAU / 12
+            for r in (4, 8, 12):
+                if self.map.height(x + r * math.cos(a), y + r * math.sin(a)) > z + 5:
+                    wx += math.cos(a) / r
+                    wy += math.sin(a) / r
+                    break
+        if wx == 0 and wy == 0:
+            val = me["aim"][0]
+        else:
+            val = math.atan2(-wy, -wx)
+        self._open_key, self._open_val = key, val
+        return val
 
     # --- small helpers
     def visible_from(self, a_pos, b_pos):
@@ -463,6 +492,7 @@ class Bot:
         # v4: always push weapons that a recently seen enemy weapon beats to the back
         pref = [k for k in pref if not any(BEATS.get(e) == k for e in recent)] + \
                [k for k in pref if any(BEATS.get(e) == k for e in recent)]
+        pref = [k for k in pref if k != "mortar"] + (["mortar"] if "mortar" in pref else [])  # mortar always last
         gather = t < 90 or (me["cubes"] < 5 and t < 180)
         self.gather = gather and not enemies and t - self.threat_t > 3 and t - self.unseen_hit_t > 3
         cur2 = w1["kind"] if w1 else None
@@ -473,7 +503,7 @@ class Bot:
                 if cur2 is None:
                     act["take"] = p["id"]
                     break
-                if pref.index(p["kind"]) < pref.index(cur2) and not (w1.get("charge", 0) > 0):
+                if pref.index(p["kind"]) < (pref.index(cur2) if cur2 in pref else len(pref)) and not (w1.get("charge", 0) > 0):
                     act["take"] = p["id"]
                     act["drop"] = 1
                     break
@@ -537,6 +567,16 @@ class Bot:
                 move_yaw = self.steer(me, self.hide, t)
             if tdist < 25 and "lightning" not in held:
                 move_yaw = ty + math.pi - self.strafe * 0.5   # back off from point-blank
+            # v5 peek: while the gun reloads (we can't shoot back), duck behind the nearest wall
+            gw = me["weapons"][held["gun"]] if "gun" in held else None
+            if gw and gw.get("reload", 0) > 0.3 and not hunt:
+                if self.duck is None or t - self.duck_t > 1.0:
+                    self.duck = self.cover_spot(me, [target["pos"]], zone)
+                    self.duck_t = t
+                if self.duck:
+                    move_yaw = yaw_to(me["pos"], self.duck)
+            else:
+                self.duck = None
             if not me["in_zone"]:
                 move_yaw = yaw_to(me["pos"], goal)
         else:
@@ -547,10 +587,33 @@ class Bot:
                     self.hide = self.pick_hide(me, zone)
                     self.hide_zone = zkey
             dest = None
-            if self.gather:
+            # v5: free cubes nearby (kill piles) at any time when no enemy is around
+            if not enemies and (me["cubes"] < self.cfg["cubes"]["stat_cap"]
+                                or me["cubes"] + 1 in self.cfg["cubes"]["upgrade_thresholds"]):
+                cs = [c for c in obs["cubes"] if dist2(me["pos"], c["pos"]) < 40 and abs(c["pos"][2] - z) < 4]
+                if cs:
+                    dest = min(cs, key=lambda c: dist2(me["pos"], c["pos"]))["pos"]
+            if dest is None and self.gather:
                 dest = self.loot_target(obs, me, held, pref, zone)
+            # v5: supply drop if it is close, landed, uncontested and inside the next circle
+            if dest is None and not enemies and t - self.threat_t > 5:
+                for dr in obs.get("drops", []):
+                    if dr["lands_in"] > 0 or (dr["holder"] is not None and dr["holder"] != me["id"]):
+                        continue
+                    dp = dr["pos"]
+                    if dist2(me["pos"], dp) > 120 or math.dist(dp[:2], goal) > zone_r:
+                        continue
+                    if any(t - ts < 10 and dist2(p, dp) < 60 for (ts, p) in self.last_seen.values()):
+                        continue
+                    dest = dp if dist2(me["pos"], dp) > dr["radius"] - 3 else None
+                    if dest is None:
+                        dest = [x, y, z]   # already inside the ring: stay
+                    break
             if dest is None:
                 dest = self.hide if self.hide else goal
+            # v5: final circle: stand at its exact centre
+            if zone_r < 30:
+                dest = [goal[0], goal[1], z]
             if dist2(me["pos"], dest) > 2.0:
                 move_yaw = self.steer(me, dest, t)
             boost = (not me["in_zone"]) and me["energy"] > 20
@@ -600,7 +663,13 @@ class Bot:
                 if k == "gun":
                     fire[i] = los and err < tol + 0.01 and d < w["stats"]["range"] and w.get("ammo", 1) > 0
                 elif k == "lightning":
-                    fire[i] = d < w["stats"]["range"] - 2 and err < math.radians(12) and me["energy"] > 10
+                    cone = math.radians(w["stats"].get("cone_deg", 30) / 2)
+                    blocker = any(o is not aim_target and dist2(me["pos"], o["pos"]) < d
+                                  and abs(wrap(yaw_to(me["pos"], o["pos"]) - me["aim"][0])) < cone
+                                  for o in (npcs + obs["crates"]))
+                    # v5: lightning only for mechs; drones and crates get bullets
+                    fire[i] = (aim_target["kind"] == "mech" and d < w["stats"]["range"] - 2
+                               and err < math.radians(12) and me["energy"] > 10 and not blocker)
                 elif k == "laser":
                     ch = w.get("charge", 0)
                     full = ch >= w["stats"]["charge"] - 0.05
@@ -630,7 +699,7 @@ class Bot:
         elif move_yaw is not None:
             act["aim"] = [move_yaw, 0.0]
         else:
-            act["aim"] = [wrap(me["aim"][0] + 0.6), 0.0]  # slow look-around when idle
+            act["aim"] = [wrap(self.open_dir(me) + 0.7 * math.sin(t * 0.8)), 0.0]  # v5: watch the open side
 
         # crates: shoot them when nothing else to do
         if self.gather and aim_target is None and not flee and obs["crates"] and "aim" in act:
@@ -686,7 +755,7 @@ class Bot:
         for pid, (k, p) in list(self.loot.items()):
             if k in held or k not in pref:
                 continue
-            if cur2 and pref.index(k) >= pref.index(cur2):
+            if cur2 and pref.index(k) >= (pref.index(cur2) if cur2 in pref else len(pref)):
                 continue
             if abs(p[2] - me["pos"][2]) > 6:
                 continue  # on a roof: skip for now
